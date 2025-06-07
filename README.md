@@ -4,6 +4,21 @@ A lightweight, student-built Ethereum-lite blockchain implementation in Rust.
 
 ---
 
+## Contents
+
+- [smvblock](#smvblock)
+  - [Contents](#contents)
+  - [Overview](#overview)
+  - [Features](#features)
+  - [How it Works](#how-it-works)
+  - [Getting Started](#getting-started)
+    - [Prerequisites](#prerequisites)
+    - [Build](#build)
+    - [Run Node](#run-node)
+    - [Run Client](#run-client)
+
+---
+
 ## Overview
 
 **smvblock** is a minimalist Ethereum-lite blockchain built from the ground up in Rust — a hands-on project designed for deep understanding, not hype or fluff. It’s modular, fast, and clean: a no-nonsense playground to grasp the core mechanics of decentralized ledgers without drowning in complexity.
@@ -30,6 +45,12 @@ Not here. Just pure, unfiltered blockchain fundamentals.
 - Web or CLI-based client interface.
 - Designed for educational purposes: free and open, no gas fees or token
   economics.
+
+---
+
+## How it Works
+
+- [How `smv-block` works.](docs/smv-block.md)
 
 ---
 
@@ -62,4 +83,3 @@ cargo run --bin node
 ```bash
 cargo run --bin client
 ```
-

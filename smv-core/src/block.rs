@@ -6,7 +6,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-const DIFFICULTY: usize = 3; // number of leading zeros
+const DIFFICULTY: usize = 2; // number of leading zeros
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {

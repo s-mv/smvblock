@@ -1,9 +1,4 @@
-use crate::{
-    block::Block,
-    state::State,
-    transaction::Transaction,
-    Result,
-};
+use crate::{Result, block::Block, state::State, transaction::Transaction};
 
 pub struct Blockchain {
     pub blocks: Vec<Block>,
@@ -39,7 +34,7 @@ impl Blockchain {
     pub fn verify_chain(&self) -> Result<()> {
         for (i, block) in self.blocks.iter().enumerate() {
             block.verify()?;
-            
+
             if i > 0 {
                 let previous_block = &self.blocks[i - 1];
                 if block.previous_hash != previous_block.hash {
