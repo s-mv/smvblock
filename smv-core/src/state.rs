@@ -40,4 +40,14 @@ impl State {
 
         Ok(())
     }
+
+    /* todo, later remove these or make them private and find a better way */
+
+    pub fn set_nonce(&mut self, sender_address: &Address, nonce: u64) {
+        self.nonces.insert(*sender_address, nonce);
+    }
+
+    pub fn set_balance(&mut self, sender_address: &Address, balance: u64) {
+        self.balances.insert(*sender_address, balance);
+    }
 }

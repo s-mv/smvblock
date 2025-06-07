@@ -18,6 +18,8 @@ pub enum BlockchainError {
     InvalidNonce,
     #[error("Invalid proof of work")]
     InvalidProofOfWork,
+    #[error("Invalid sender address")]
+    InvalidSenderAddress,
     #[error("Crypto error: {0}")]
     CryptoError(String),
     #[error("State error: {0}")]
