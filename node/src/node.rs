@@ -34,7 +34,7 @@ pub struct Node {
 
 impl Node {
     pub fn new(config: NodeConfig) -> Self {
-        let (ready_tx, _) = broadcast::channel(1);
+        let (ready_tx, _) = broadcast::channel(16);
         let p2p = P2P::new(
             config.node_type.clone(),
             config.network.clone(),

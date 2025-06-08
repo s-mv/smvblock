@@ -3,6 +3,8 @@ use crate::node::{Node, NodeType, ReadyState};
 use smv_core::Network;
 use std::error::Error;
 use std::net::SocketAddr;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 pub struct DevnetConfig {
     pub seed_nodes: Vec<SocketAddr>,
@@ -28,61 +30,62 @@ impl Default for DevnetConfig {
     }
 }
 
-async fn start_node(config: NodeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+// this was hell
+async fn start_node(config: NodeConfig) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
     let node = Node::new(config.clone());
     let mut rx = node.subscribe_ready();
 
-    let node_handle = tokio::spawn(async move { node.start().await.map_err(|e| e.to_string()) });
+    let node_handle = tokio::spawn(async move {
+        node.start()
+            .await
+            .map_err(|e| e.to_string())
+            .map_err(|e| e.into())
+    });
 
     println!("Waiting for ready signal from {}", config.listen_addr);
-    let ready_result = rx.recv().await;
-    println!(
-        "Received result from {}: {:?}",
-        config.listen_addr, ready_result
-    );
 
-    match ready_result {
-        Ok(ReadyState::Ready) => {
-            println!("Node on {} is ready", config.listen_addr);
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            if node_handle.is_finished() {
-                match node_handle.await {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(e.into()),
-                    Err(e) => Err(format!("Node task panicked: {}", e).into()),
-                }
-            } else {
-                Ok(())
+    loop {
+        match rx.recv().await {
+            Ok(ReadyState::Ready) => {
+                println!("Node on {} is ready", config.listen_addr);
+                return node_handle;
             }
-        }
-        Ok(ReadyState::Failed(e)) => Err(format!("Node failed: {}", e).into()),
-        Err(recv_error) => {
-            println!(
-                "Channel recv error for {}: {:?}",
-                config.listen_addr, recv_error
-            );
-            Err(format!("Node startup timed out: {:?}", recv_error).into())
-        }
-        other => {
-            println!(
-                "Unexpected ready state for {}: {:?}",
-                config.listen_addr, other
-            );
-            Err(format!("Unexpected node state: {:?}", other).into())
+            Ok(ReadyState::Failed(e)) => {
+                eprintln!("Node on {} failed to start: {}", config.listen_addr, e);
+                node_handle.abort();
+                return tokio::spawn(async { Err(e.into()) });
+            }
+            Ok(state) => {
+                println!("Node on {} state: {:?}", config.listen_addr, state);
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                println!(
+                    "Receiver for {} lagged by {} messages, continuing...",
+                    config.listen_addr, n
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                eprintln!(
+                    "Ready channel closed unexpectedly for {}",
+                    config.listen_addr
+                );
+                node_handle.abort();
+                return tokio::spawn(async { Err("Ready channel closed".into()) });
+            }
         }
     }
 }
+
 pub async fn start_devnet() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = DevnetConfig::default();
+
+    let mut handles = Vec::new();
 
     println!("Starting seed nodes...");
     for addr in config.seed_nodes.clone() {
         let node_config = NodeConfig::new(NodeType::Seed, Network::Devnet, Some(addr), None);
-        if let Err(e) = start_node(node_config).await {
-            eprintln!("Seed node {} failed to start: {}", addr, e);
-            return Err(e);
-        }
+        let handle = start_node(node_config).await;
+        handles.push(handle);
     }
     println!("All seed nodes are ready");
 
@@ -94,10 +97,8 @@ pub async fn start_devnet() -> Result<(), Box<dyn std::error::Error + Send + Syn
             Some(addr),
             Some(config.seed_nodes[0]),
         );
-        if let Err(e) = start_node(node_config).await {
-            eprintln!("Normal node {} failed to start: {}", addr, e);
-            return Err(e);
-        }
+        let handle = start_node(node_config).await;
+        handles.push(handle);
     }
 
     println!("Starting shallow nodes...");
@@ -108,12 +109,19 @@ pub async fn start_devnet() -> Result<(), Box<dyn std::error::Error + Send + Syn
             Some(addr),
             Some(config.seed_nodes[0]),
         );
-        if let Err(e) = start_node(node_config).await {
-            eprintln!("Shallow node {} failed to start: {}", addr, e);
-            return Err(e);
-        }
+        let handle = start_node(node_config).await;
+        handles.push(handle);
     }
 
     println!("All nodes are running");
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(())) => (),
+            Ok(Err(e)) => eprintln!("Node exited with error: {}", e),
+            Err(e) => eprintln!("Node task panicked: {}", e),
+        }
+    }
+
     Ok(())
 }
