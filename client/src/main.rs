@@ -30,6 +30,18 @@ enum Commands {
         #[arg(long)]
         amount: u64,
     },
+
+    Connect {
+        #[arg(long)]
+        node: Url,
+        #[arg(long)]
+        peer: String,
+    },
+
+    GetPeers {
+        #[arg(long)]
+        node: Url,
+    },
 }
 
 #[tokio::main]
@@ -52,6 +64,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::SendTx { node, to, amount }) => {
             cli::handle_send_tx(node, to, amount).await?;
+        }
+        Some(Commands::Connect { node, peer }) => {
+            cli::handle_connect(node, peer).await?;
+        }
+        Some(Commands::GetPeers { node }) => {
+            cli::handle_get_peers(node).await?;
         }
         None => {
             println!("No command specified. Use --help for usage information.");

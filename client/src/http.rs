@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use url::Url;
@@ -15,6 +16,8 @@ pub struct NodeStatus {
 enum Message {
     GetStatus {},
     SendTransaction { to: String, amount: u64 },
+    GetPeers {},
+    Hello { address: SocketAddr },
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +25,7 @@ enum Message {
 enum ResponseMessage {
     Status { head_hash: String, height: u64 },
     TransactionResponse { hash: String },
+    Peers(Vec<SocketAddr>),
 }
 
 pub async fn get_status(node: &Url) -> Result<NodeStatus> {
@@ -81,4 +85,53 @@ pub async fn send_transaction(node: &Url, to: &str, amount: u64) -> Result<Strin
         ResponseMessage::TransactionResponse { hash } => Ok(hash),
         _ => Err(anyhow::anyhow!("Unexpected response type")),
     }
+}
+
+pub async fn get_peers(node: &Url) -> Result<Vec<SocketAddr>> {
+    let addr = format!(
+        "{}:{}",
+        node.host_str().unwrap(),
+        node.port().unwrap_or(8000)
+    );
+    let stream = TcpStream::connect(addr)
+        .await
+        .context("Failed to connect to node")?;
+    let (read_half, write_half) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(read_half);
+    let mut writer = tokio::io::BufWriter::new(write_half);
+
+    let msg = serde_json::to_string(&Message::GetPeers {})?;
+    writer.write_all(msg.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let msg: ResponseMessage = serde_json::from_str(&line)?;
+    match msg {
+        ResponseMessage::Peers(peers) => Ok(peers),
+        _ => Err(anyhow::anyhow!("Unexpected response type")),
+    }
+}
+
+pub async fn connect_to_peer(node: &Url, peer: &str) -> Result<()> {
+    let addr = format!(
+        "{}:{}",
+        node.host_str().unwrap(),
+        node.port().unwrap_or(8000)
+    );
+    let stream = TcpStream::connect(addr)
+        .await
+        .context("Failed to connect to node")?;
+    let (_, mut writer) = stream.into_split();
+
+    let peer_addr: SocketAddr = peer.parse()?;
+    let msg = serde_json::to_string(&Message::Hello { address: peer_addr })?;
+
+    writer.write_all(msg.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+
+    Ok(())
 }

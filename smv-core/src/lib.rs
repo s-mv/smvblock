@@ -33,21 +33,21 @@ pub type Result<T> = std::result::Result<T, BlockchainError>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Network {
-    Testnet,
+    Devnet,
     Mainnet,
 }
 
 impl Network {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Network::Testnet => "testnet",
+            Network::Devnet => "devnet",
             Network::Mainnet => "mainnet",
         }
     }
 
     pub fn genesis_hash(&self) -> String {
         match self {
-            Network::Testnet => "000000test000000000000000000000000000000000000000000000000000000",
+            Network::Devnet => "000000dev0000000000000000000000000000000000000000000000000000000",
             Network::Mainnet => "000000main000000000000000000000000000000000000000000000000000000",
         }
         .to_string()
@@ -62,7 +62,7 @@ impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Network::Mainnet => write!(f, "Mainnet"),
-            Network::Testnet => write!(f, "Testnet"),
+            Network::Devnet => write!(f, "Devnet"),
         }
     }
 }

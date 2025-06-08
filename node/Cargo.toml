@@ -1,0 +1,20 @@
+[package]
+name = "node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.39", features = ["derive"] }
+dirs = "6.0.0"
+rusqlite = { version = "0.36.0", features = ["bundled"] }
+serde = "1.0.219"
+serde_json = "1.0.140"
+smv-core = { path = "../smv-core" }
+tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+# [mainnet]
+# seed_nodes = [
+#    "127.0.0.1:8001",
+#    "127.0.0.1:8002", 
+#    "127.0.0.1:8003"
+# ]

@@ -1,4 +1,4 @@
-use crate::http::{get_status, send_transaction};
+use crate::http::{connect_to_peer, get_peers, get_status, send_transaction};
 use anyhow::Result;
 use url::Url;
 
@@ -14,5 +14,20 @@ pub async fn handle_send_tx(node: Url, to: String, amount: u64) -> Result<()> {
     let tx_hash = send_transaction(&node, &to, amount).await?;
     println!("Transaction sent successfully!");
     println!("Transaction hash: {}", tx_hash);
+    Ok(())
+}
+
+pub async fn handle_connect(node: Url, peer: String) -> Result<()> {
+    connect_to_peer(&node, &peer).await?;
+    println!("Successfully connected to peer: {}", peer);
+    Ok(())
+}
+
+pub async fn handle_get_peers(node: Url) -> Result<()> {
+    let peers = get_peers(&node).await?;
+    println!("Connected peers:");
+    for peer in peers {
+        println!("  {}", peer);
+    }
     Ok(())
 }

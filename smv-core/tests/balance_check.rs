@@ -7,11 +7,11 @@ fn block_with_insufficient_balance_transaction() {
     let pikachu_keypair = generate_keypair();
     let geodude_keypair = generate_keypair();
     let geodude_address = public_key_to_address(&geodude_keypair.verifying_key);
-    
+
     let mut blockchain = Blockchain::new();
     println!("geodudea");
-    
+
     let tx = Transaction::new(&pikachu_keypair, geodude_address, 50, 1);
-    
+
     assert!(blockchain.add_transaction(tx).is_err());
 }
