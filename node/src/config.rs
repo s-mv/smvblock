@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use smv_core::Network;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::node::NodeType;
 
@@ -46,12 +46,13 @@ impl NodeConfig {
     }
 
     pub fn database_path(&self) -> PathBuf {
-        let path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let formatted_addr = self.listen_addr.to_string().replace(":", "_");
+        let path = home_dir
             .join(".smvblock")
-            .join(self.network.as_str());
-        std::fs::create_dir_all(&path).unwrap();
-        path.join("chain.db")
+            .join(format!("{}.db", formatted_addr));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
     }
 }
 

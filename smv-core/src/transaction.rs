@@ -105,12 +105,13 @@ impl Transaction {
         self.validate_light()?;
 
         let sender_balance = state.get_balance(&self.sender);
+        
         if sender_balance < self.amount {
             return Err(BlockchainError::InsufficientBalance);
         }
 
-        let current_nonce = state.get_nonce(&self.sender);
-        if self.nonce != current_nonce + 1 {
+        let expected_nonce = state.get_nonce(&self.sender);
+        if self.nonce != expected_nonce {
             return Err(BlockchainError::InvalidNonce);
         }
 

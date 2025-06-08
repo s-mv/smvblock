@@ -39,14 +39,15 @@ impl Node {
             config.node_type.clone(),
             config.network.clone(),
             config.listen_addr,
+            config.database_path().as_path(),
         );
 
         Self {
             node_type: config.node_type.clone(),
             listen_addr: config.listen_addr,
             seed_addr: config.seed_addr,
-            p2p,
             config,
+            p2p: p2p.unwrap(),
             ready_tx,
         }
     }
@@ -83,7 +84,7 @@ impl Node {
 
         match &self.node_type {
             NodeType::Seed => {
-                if let Err(e) = self.p2p.run().await {
+                if let Err(e) = self.p2p.run(self.config.database_path().as_path()).await {
                     self.ready_tx.send(ReadyState::Failed(e.to_string()))?;
                     return Err(e);
                 }
@@ -95,7 +96,7 @@ impl Node {
                         return Err(e);
                     }
                 }
-                if let Err(e) = self.p2p.run().await {
+                if let Err(e) = self.p2p.run(self.config.database_path().as_path()).await {
                     self.ready_tx.send(ReadyState::Failed(e.to_string()))?;
                     return Err(e);
                 }

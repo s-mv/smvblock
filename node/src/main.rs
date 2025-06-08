@@ -2,7 +2,6 @@ mod config;
 mod devnet;
 mod node;
 mod p2p;
-mod storage;
 
 use clap::{Parser, ValueEnum};
 use config::NodeConfig;
@@ -44,6 +43,9 @@ struct Cli {
 
     #[arg(long)]
     devnet: bool,
+
+    #[arg(long)]
+    reset_db: bool,
 }
 
 #[tokio::main]
@@ -51,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     if cli.devnet {
-        devnet::start_devnet().await.unwrap();
+        devnet::start_devnet(cli.reset_db).await.unwrap();
     } else {
         let network = match cli.network.as_str() {
             "devnet" => Network::Devnet,

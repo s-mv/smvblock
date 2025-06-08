@@ -9,6 +9,10 @@ fn chain_growth_with_valid_blocks() {
     let geodude_keypair = generate_keypair();
     let geodude_address = public_key_to_address(&geodude_keypair.verifying_key);
 
+    blockchain
+        .state
+        .set_balance(&public_key_to_address(&pikachu_keypair.verifying_key), 1000);
+
     let tx = Transaction::new(&pikachu_keypair, geodude_address, 10, 1);
     blockchain.add_transaction(tx).unwrap();
 

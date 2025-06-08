@@ -5,6 +5,8 @@ use std::error::Error;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use std::fs;
+use std::path::Path;
 
 pub struct DevnetConfig {
     pub seed_nodes: Vec<SocketAddr>,
@@ -76,8 +78,13 @@ async fn start_node(config: NodeConfig) -> JoinHandle<Result<(), Box<dyn Error +
     }
 }
 
-pub async fn start_devnet() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn start_devnet(reset_db: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = DevnetConfig::default();
+    let db_path = Path::new("blockchain.db");
+
+    if reset_db {
+        fs::remove_file(db_path).unwrap_or_else(|_| ());
+    }
 
     let mut handles = Vec::new();
 

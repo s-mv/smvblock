@@ -1,14 +1,16 @@
 use crate::node::NodeType;
 use serde::{Deserialize, Serialize};
 use smv_core::Network;
+use smv_core::blockchain::Blockchain;
 use std::collections::HashMap;
+use std::error::Error;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
-
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -30,7 +32,7 @@ pub enum Message {
         amount: u64,
     },
     TransactionResponse {
-        hash: String,
+        result: Result<String, String>,
     },
 }
 
@@ -44,30 +46,41 @@ pub struct P2P {
     peers: Arc<Mutex<HashMap<SocketAddr, (NodeType, Instant)>>>,
     head_hash: Arc<Mutex<String>>,
     height: Arc<Mutex<u64>>,
+    blockchain: Arc<Mutex<Blockchain>>, // shared blockchain instance
 }
 
 impl P2P {
-    pub fn new(node_type: NodeType, network: Network, address: SocketAddr) -> Self {
-        Self {
+    pub fn new(
+        node_type: NodeType,
+        network: Network,
+        address: SocketAddr,
+        db_path: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        let blocks = Blockchain::load_blocks_from_db(db_path)?;
+        let blockchain = Blockchain::from_blocks(blocks);
+
+        Ok(Self {
             node_type,
             network,
             address,
             peers: Arc::new(Mutex::new(HashMap::new())),
             head_hash: Arc::new(Mutex::new(String::from("genesis"))),
             height: Arc::new(Mutex::new(0)),
-        }
+            blockchain: Arc::new(Mutex::new(blockchain)),
+        })
     }
 
-    pub async fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn init(&self) -> Result<(), Box<dyn Error>> {
         let _listener = TcpListener::bind(self.address).await?;
         Ok(())
     }
 
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(&self, db_path: &Path) -> Result<(), Box<dyn Error>> {
         let listener = TcpListener::bind(self.address).await?;
         let peers = self.peers.clone();
         let head_hash = self.head_hash.clone();
         let height = self.height.clone();
+        let blockchain = self.blockchain.clone();
 
         let cleanup_peers = peers.clone();
         tokio::spawn(async move {
@@ -83,11 +96,17 @@ impl P2P {
             let peers = peers.clone();
             let head_hash = head_hash.clone();
             let height = height.clone();
-            let network = self.network.clone();
+            let blockchain = blockchain.clone();
+            let db_path = db_path.to_path_buf();
+
+            let p2p = self.clone();
+
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(socket, peer_addr, peers, head_hash, height, network)
-                        .await
+                if let Err(e) = p2p
+                    .handle_connection(
+                        socket, peer_addr, peers, head_hash, height, blockchain, &db_path,
+                    )
+                    .await
                 {
                     eprintln!("Error handling connection from {}: {}", peer_addr, e);
                 }
@@ -99,10 +118,7 @@ impl P2P {
         self.address
     }
 
-    pub async fn connect_to_peer(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn Error>> {
         let stream = TcpStream::connect(addr).await?;
         let hello = Message::Hello {
             address: self.address,
@@ -117,13 +133,15 @@ impl P2P {
     }
 
     async fn handle_connection(
+        &self,
         stream: TcpStream,
         peer_addr: SocketAddr,
         peers: Arc<Mutex<HashMap<SocketAddr, (NodeType, Instant)>>>,
         head_hash: Arc<Mutex<String>>,
         height: Arc<Mutex<u64>>,
-        network: Network,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        blockchain: Arc<Mutex<Blockchain>>,
+        db_path: &Path,
+    ) -> Result<(), Box<dyn Error>> {
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
         let mut writer = tokio::io::BufWriter::new(write_half);
@@ -143,10 +161,10 @@ impl P2P {
                     node_type,
                     network: peer_network,
                 } => {
-                    if peer_network != network.as_str() {
+                    if peer_network != self.network.as_str() {
                         eprintln!(
                             "[{}] Rejected peer {} - network mismatch",
-                            network.as_str().to_uppercase(),
+                            self.network.as_str().to_uppercase(),
                             address
                         );
                         return Ok(());
@@ -155,7 +173,7 @@ impl P2P {
                     if address != peer_addr {
                         eprintln!(
                             "[{}] Warning: Peer claims to be {}, but connected from {}",
-                            network.as_str().to_uppercase(),
+                            self.network.as_str().to_uppercase(),
                             address,
                             peer_addr
                         );
@@ -184,10 +202,67 @@ impl P2P {
                     writer.write_all(b"\n").await?;
                     writer.flush().await?;
                 }
-                Message::SendTransaction { to: _, amount: _ } => {
-                    let response = Message::TransactionResponse {
-                        hash: "dummy_hash".to_string(),
+                Message::SendTransaction { to, amount } => {
+                    let blockchain = blockchain.clone();
+                    let response = {
+                        let mut blockchain = blockchain.lock().await;
+
+                        let sender_keypair = smv_core::crypto::generate_keypair();
+                        let sender_address =
+                            smv_core::crypto::public_key_to_address(&sender_keypair.verifying_key);
+
+                        let receiver_address: smv_core::crypto::Address = match hex::decode(&to) {
+                            Ok(decoded) => match decoded.try_into() {
+                                Ok(addr) => addr,
+                                Err(_) => {
+                                    eprintln!("Invalid receiver address length: {}", to);
+                                    return Ok(());
+                                }
+                            },
+                            Err(_) => {
+                                eprintln!("Invalid receiver address format: {}", to);
+                                return Ok(());
+                            }
+                        };
+
+                        let expected_nonce = blockchain.state.get_nonce(&sender_address);
+
+                        let transaction = smv_core::transaction::Transaction::new(
+                            &sender_keypair,
+                            receiver_address,
+                            amount,
+                            expected_nonce,
+                        );
+
+                        match transaction.validate(
+                            smv_core::transaction::ValidationLevel::Full,
+                            Some(&blockchain.state),
+                        ) {
+                            Ok(_) => match blockchain.add_transaction(transaction.clone()) {
+                                Ok(_) => Message::TransactionResponse {
+                                    result: Ok(hex::encode(transaction.hash())),
+                                },
+                                Err(e) => {
+                                    eprintln!("Failed to add transaction: {}", e);
+                                    Message::TransactionResponse {
+                                        result: Err("error".to_string()),
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!("Transaction validation failed: {}", e);
+                                Message::TransactionResponse {
+                                    result: Err("validation error".to_string()),
+                                }
+                            }
+                        }
                     };
+
+                    let blockchain = blockchain.lock().await;
+                    blockchain.save_blocks_to_db(db_path)?;
+
+                    blockchain.save_blocks_to_db(db_path)?;
+
                     let response = serde_json::to_string(&response)?;
                     writer.write_all(response.as_bytes()).await?;
                     writer.write_all(b"\n").await?;
@@ -200,10 +275,7 @@ impl P2P {
         Ok(())
     }
 
-    pub async fn get_peers(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error>> {
+    pub async fn get_peers(&self, addr: SocketAddr) -> Result<Vec<SocketAddr>, Box<dyn Error>> {
         let stream = TcpStream::connect(addr).await?;
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
@@ -223,10 +295,7 @@ impl P2P {
         }
     }
 
-    pub async fn get_status(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<(String, u64), Box<dyn std::error::Error>> {
+    pub async fn get_status(&self, addr: SocketAddr) -> Result<(String, u64), Box<dyn Error>> {
         let stream = TcpStream::connect(addr).await?;
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);

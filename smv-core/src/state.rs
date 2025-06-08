@@ -17,12 +17,12 @@ impl State {
     }
 
     pub fn get_nonce(&self, address: &Address) -> u64 {
-        *self.nonces.get(address).unwrap_or(&0)
+        self.nonces.get(address).unwrap_or(&0) + 1
     }
 
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<()> {
-        let current_nonce = self.get_nonce(&tx.sender);
-        if tx.nonce != current_nonce + 1 {
+        let expected_nonce = self.get_nonce(&tx.sender);
+        if tx.nonce != expected_nonce {
             return Err(BlockchainError::InvalidNonce);
         }
 
