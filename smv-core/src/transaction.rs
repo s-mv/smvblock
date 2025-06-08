@@ -38,7 +38,6 @@ impl Transaction {
         let message = Self::create_message(&sender, &receiver, amount, nonce);
         let message_hash = hash(&message);
 
-        // clone is fine if you're using a Copy-safe key or keypool
         let signature = sender_keypair
             .signing_key
             .clone()
@@ -68,7 +67,6 @@ impl Transaction {
         let public_key = VerifyingKey::from_bytes(&self.sender_public_key)
             .map_err(|_| BlockchainError::InvalidSignature)?;
 
-        // Ensure public key matches declared sender
         let expected_sender = public_key_to_address(&public_key);
         if expected_sender != self.sender {
             return Err(BlockchainError::InvalidSenderAddress);

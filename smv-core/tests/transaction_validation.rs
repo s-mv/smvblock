@@ -40,7 +40,7 @@ fn test_light_validation_success() {
 #[test]
 fn test_light_validation_invalid_signature() {
     let (mut transaction, _) = setup_transaction();
-    // Corrupt signature
+    // corrupt signature
     transaction.signature[0] = !transaction.signature[0];
     assert!(transaction.validate(ValidationLevel::Light, None).is_err());
 }

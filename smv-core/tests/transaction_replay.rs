@@ -11,10 +11,8 @@ fn reject_duplicate_transaction() {
 
     let tx = Transaction::new(&pikachu_keypair, geodude_address, 10, 1);
     
-    // First use should succeed
     blockchain.add_transaction(tx.clone()).unwrap();
     blockchain.mine_block().unwrap();
     
-    // Second use should fail due to nonce
     assert!(blockchain.add_transaction(tx).is_err());
 }
