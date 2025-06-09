@@ -1,8 +1,8 @@
 use crate::db::Database;
 use crate::node::{NodeError, NodeType};
-use serde::{Deserialize, Serialize};
 use smv_core::Network;
 use smv_core::blockchain::Blockchain;
+use smv_core::interface::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -13,31 +13,7 @@ use tokio::sync::Mutex;
 use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Message {
-    Hello {
-        address: SocketAddr,
-        node_type: NodeType,
-        network: String,
-    },
-    GetStatus,
-    Status {
-        head_hash: String,
-        height: u64,
-    },
-    GetPeers,
-    Peers(Vec<SocketAddr>),
-    SendTransaction {
-        to: String,
-        amount: u64,
-    },
-    TransactionResponse {
-        result: Result<String, String>,
-    },
-}
-
-const PEER_TIMEOUT: Duration = Duration::from_secs(300);
+const PEER_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct P2P {
@@ -80,7 +56,7 @@ impl P2P {
         Ok(())
     }
 
-    pub async fn run(&self, db_path: &Path) -> Result<(), NodeError> {
+    pub async fn run(&self) -> Result<(), NodeError> {
         let listener = TcpListener::bind(self.address).await?;
         let peers = self.peers.clone();
         let head_hash = self.head_hash.clone();
@@ -88,7 +64,7 @@ impl P2P {
         let blockchain = self.blockchain.clone();
 
         let cleanup_peers = peers.clone();
-        spawn_local(async move {
+        tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let mut peers = cleanup_peers.lock().await;
@@ -102,15 +78,12 @@ impl P2P {
             let head_hash = head_hash.clone();
             let height = height.clone();
             let blockchain = blockchain.clone();
-            let db_path = db_path.to_path_buf();
 
             let p2p = self.clone();
 
             spawn_local(async move {
                 if let Err(e) = p2p
-                    .handle_connection(
-                        socket, peer_addr, peers, head_hash, height, blockchain, &db_path,
-                    )
+                    .handle_connection(socket, peer_addr, peers, head_hash, height, blockchain)
                     .await
                 {
                     eprintln!("Error handling connection from {}: {}", peer_addr, e);
@@ -130,7 +103,7 @@ impl P2P {
             Ok(stream) => {
                 let hello = Message::Hello {
                     address: self.address,
-                    node_type: self.node_type.clone(),
+                    node_type: self.node_type.to_string(),
                     network: self.network.to_string(),
                 };
                 let msg = serde_json::to_string(&hello)?;
@@ -149,6 +122,7 @@ impl P2P {
             }
         }
     }
+
     async fn handle_connection(
         &self,
         stream: TcpStream,
@@ -157,7 +131,6 @@ impl P2P {
         head_hash: Arc<Mutex<String>>,
         height: Arc<Mutex<u64>>,
         blockchain: Arc<Mutex<Blockchain>>,
-        db_path: &Path,
     ) -> Result<(), NodeError> {
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
@@ -178,7 +151,8 @@ impl P2P {
                     node_type,
                     network: peer_network,
                 } => {
-                    if peer_network != self.network.as_str() {
+
+                    if peer_network.to_lowercase() != self.network.as_str() {
                         eprintln!(
                             "[{}] Rejected peer {} - network mismatch",
                             self.network.as_str().to_uppercase(),
@@ -197,7 +171,15 @@ impl P2P {
                     }
 
                     let mut peers = peers.lock().await;
-                    peers.insert(peer_addr, (node_type, Instant::now()));
+                    peers.insert(peer_addr, (NodeType::evaluate(node_type), Instant::now()));
+
+                    let response = Message::HelloResponse {
+                        node_type: self.node_type.to_string(),
+                    };
+                    let response_str = serde_json::to_string(&response)?;
+                    writer.write_all(response_str.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
                 }
                 Message::GetStatus => {
                     let status = Message::Status {
@@ -212,12 +194,16 @@ impl P2P {
                 Message::GetPeers => {
                     let peers_list = {
                         let peers = peers.lock().await;
-                        peers.keys().cloned().collect::<Vec<_>>()
+                        peers
+                            .keys()
+                            .map(|addr| addr.to_string())
+                            .collect::<Vec<_>>()
                     };
-                    let response = serde_json::to_string(&Message::Peers(peers_list))?;
+                    let response = serde_json::to_string(&Message::Peers { peers: peers_list })?;
                     writer.write_all(response.as_bytes()).await?;
                     writer.write_all(b"\n").await?;
                     writer.flush().await?;
+                    println!("Serialized peers list: {:?}", response); // Debug log
                 }
                 Message::SendTransaction { to, amount } => {
                     let blockchain = blockchain.clone();
@@ -302,8 +288,15 @@ impl P2P {
         let mut line = String::new();
         reader.read_line(&mut line).await?;
 
-        if let Message::Peers(peers) = serde_json::from_str(&line)? {
-            Ok(peers)
+        if let Message::Peers { peers } = serde_json::from_str(&line)? {
+            let peers = peers
+                .into_iter()
+                .map(|addr| {
+                    addr.parse()
+                        .map_err(|_| NodeError::Other("Invalid address".to_string()))
+                })
+                .collect();
+            peers
         } else {
             Err(NodeError::Other("Invalid response".to_string()))
         }
@@ -327,5 +320,25 @@ impl P2P {
         } else {
             Err(NodeError::Other("Invalid response".to_string()))
         }
+    }
+
+    pub async fn add_peer(&self, addr: SocketAddr, node_type: NodeType) {
+        let mut peers = self.peers.lock().await;
+        peers.insert(addr, (node_type, Instant::now()));
+        println!("Added peer: {}", addr);
+    }
+
+    pub async fn remove_peer(&self, addr: SocketAddr) {
+        let mut peers = self.peers.lock().await;
+        if peers.remove(&addr).is_some() {
+            println!("Removed peer: {}", addr);
+        } else {
+            println!("Peer not found: {}", addr);
+        }
+    }
+
+    pub async fn list_peers(&self) -> Vec<SocketAddr> {
+        let peers = self.peers.lock().await;
+        peers.keys().cloned().collect::<Vec<_>>()
     }
 }

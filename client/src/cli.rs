@@ -18,12 +18,28 @@ pub async fn handle_send_tx(node: Url, to: String, amount: u64) -> Result<()> {
 }
 
 pub async fn handle_connect(node: Url, peer: String) -> Result<()> {
-    connect_to_peer(&node, &peer).await?;
+    let node_type = connect_to_peer(&node, &peer).await?;
     println!("Successfully connected to peer: {}", peer);
+    println!("Peer node type: {}", node_type);
     Ok(())
 }
 
 pub async fn handle_get_peers(node: Url) -> Result<()> {
+    let peers = get_peers(&node).await?;
+    println!("Connected peers:");
+    for peer in peers {
+        println!("  {}", peer);
+    }
+    Ok(())
+}
+
+pub async fn handle_add_peer(node: Url, peer: String) -> Result<()> {
+    connect_to_peer(&node, &peer).await?;
+    println!("Successfully added peer: {}", peer);
+    Ok(())
+}
+
+pub async fn handle_list_peers(node: Url) -> Result<()> {
     let peers = get_peers(&node).await?;
     println!("Connected peers:");
     for peer in peers {

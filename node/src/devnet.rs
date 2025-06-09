@@ -1,5 +1,6 @@
 use crate::config::NodeConfig;
 use crate::node::{Node, NodeError, NodeType};
+use futures::future::{join_all, pending};
 use smv_core::Network;
 use tokio::task::{LocalSet, spawn_local};
 
@@ -72,57 +73,65 @@ impl Devnet {
                 .chain(self.normal_nodes.iter())
                 .chain(self.shallow_nodes.iter())
             {
-                let p2p = node.p2p.clone();
-                p2p.db.delete_db()?;
-                p2p.db.init()?;
-                println!("Database reset for node at {}", node.listen_addr);
+                let db_path = node.config.database_path();
+                if db_path.exists() {
+                    std::fs::remove_file(&db_path).ok();
+                    println!("Deleted database file: {}", db_path.display());
+                }
+                node.p2p.db.init()?;
             }
         }
 
         let local_set = LocalSet::new();
+
         local_set
             .run_until(async {
                 println!("Starting seed nodes...");
                 for node in self.seed_nodes.clone() {
-                    Self::start_node(node).await?;
+                    self.spawn_node_task(&local_set, node);
                 }
 
                 println!("Starting normal nodes...");
                 for node in self.normal_nodes.clone() {
-                    Self::start_node(node).await?;
+                    self.spawn_node_task(&local_set, node);
                 }
 
                 println!("Starting shallow nodes...");
                 for node in self.shallow_nodes.clone() {
-                    Self::start_node(node).await?;
+                    self.spawn_node_task(&local_set, node);
                 }
 
                 println!("Connecting nodes...");
                 self.connect_nodes().await?;
 
                 println!("All nodes are running");
+
+                pending::<()>().await;
+
+                #[allow(unreachable_code)]
                 Ok(())
             })
             .await
     }
 
-    async fn start_node(node: Node) -> Result<(), NodeError> {
-        println!("Starting node on {}", node.listen_addr);
-
-        spawn_local(async move {
+    fn spawn_node_task(&self, local_set: &LocalSet, node: Node) {
+        local_set.spawn_local(async move {
             if let Err(e) = node.start().await {
                 eprintln!("Node on {} failed: {}", node.listen_addr, e);
             }
         });
-
-        Ok(())
     }
 
     async fn connect_nodes(&self) -> Result<(), NodeError> {
-        // Wait for seed nodes to be ready
-        for seed_node in &self.seed_nodes {
-            seed_node.subscribe_ready().recv().await.ok();
-        }
+        let mut receivers: Vec<_> = self
+            .seed_nodes
+            .iter()
+            .map(|seed_node| seed_node.subscribe_ready())
+            .collect();
+
+        let futures = receivers.iter_mut().map(|rx| rx.recv());
+
+        let _results = join_all(futures).await;
 
         for normal_node in &self.normal_nodes {
             for seed_node in &self.seed_nodes {

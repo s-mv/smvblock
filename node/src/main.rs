@@ -7,9 +7,10 @@ mod p2p;
 use clap::{Parser, ValueEnum};
 use config::NodeConfig;
 use devnet::Devnet;
-use node::{Node, NodeError, NodeType}; // Updated import to include NodeError.
+use node::{Node, NodeError, NodeType};
 use smv_core::Network;
 use std::net::SocketAddr;
+use tokio::task::LocalSet;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Mode {
@@ -48,6 +49,12 @@ struct Cli {
 
     #[arg(long)]
     reset_db: bool,
+
+    #[arg(long)]
+    add_peer: Option<SocketAddr>,
+
+    #[arg(long)]
+    list_peers: bool,
 }
 
 #[tokio::main]
@@ -55,8 +62,15 @@ async fn main() -> Result<(), NodeError> {
     let cli = Cli::parse();
 
     if cli.devnet {
-        let devnet = Devnet::default();
-        devnet.start(cli.reset_db).await?;
+        let local_set = LocalSet::new();
+
+        local_set
+            .run_until(async {
+                let devnet = Devnet::default();
+                devnet.start(cli.reset_db).await?;
+                Ok::<(), NodeError>(())
+            })
+            .await?;
     } else {
         let network = match cli.network.as_str() {
             "devnet" => Network::Devnet,
@@ -84,6 +98,25 @@ async fn main() -> Result<(), NodeError> {
                 std::process::exit(1);
             }
             _ => {}
+        }
+
+        if let Some(peer) = cli.add_peer {
+            let config =
+                NodeConfig::new(node_type.clone(), network, cli.listen_addr, cli.connect_to);
+            let node = Node::new(config);
+            node.add_peer(peer, node_type).await;
+            return Ok(());
+        }
+
+        if cli.list_peers {
+            let config = NodeConfig::new(node_type, network, cli.listen_addr, cli.connect_to);
+            let node = Node::new(config);
+            let peers = node.list_peers().await;
+            println!("Connected peers:");
+            for peer in peers {
+                println!("  {}", peer);
+            }
+            return Ok(());
         }
 
         let config = NodeConfig::new(node_type, network, cli.listen_addr, cli.connect_to);

@@ -8,8 +8,10 @@ pub mod blockchain;
 pub mod crypto;
 pub mod state;
 pub mod transaction;
+pub mod interface;
 
 #[derive(Error, Debug)]
+
 pub enum BlockchainError {
     #[error("Invalid signature")]
     InvalidSignature,

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use smv_core::interface::handshake;
 use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -22,11 +23,29 @@ pub enum NodeError {
     Other(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum NodeType {
     Seed,
     Normal,
     Shallow,
+}
+
+impl std::fmt::Display for NodeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl NodeType {
+    pub fn evaluate(string: String) -> NodeType {
+        match string.to_lowercase().as_str() {
+            "seed" => NodeType::Seed,
+            "normal" => NodeType::Normal,
+            "shallow" => NodeType::Shallow,
+            _ => panic!("Unknown NodeType: {}", string), // TODO, more elegant handling
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +101,7 @@ impl Node {
             NodeType::Normal | NodeType::Shallow => {
                 println!(
                     "{} node ready on {}, will connect to seed: {}",
-                    format!("{:?}", self.node_type).to_lowercase(),
+                    format!("{:?}", self.node_type),
                     self.listen_addr,
                     self.seed_addr.expect("Seed address required")
                 );
@@ -95,16 +114,15 @@ impl Node {
 
     pub async fn run(&self) -> Result<(), NodeError> {
         self.ready_tx.send(ReadyState::Running).ok();
-
         match &self.node_type {
             NodeType::Seed => {
-                self.p2p.run(self.config.database_path().as_path()).await?;
+                self.p2p.run().await?;
             }
             NodeType::Normal | NodeType::Shallow => {
                 if let Some(seed) = self.seed_addr {
                     self.p2p.connect_to_peer(seed).await?;
                 }
-                self.p2p.run(self.config.database_path().as_path()).await?;
+                self.p2p.run().await?;
             }
         }
 
@@ -116,30 +134,36 @@ impl Node {
         self.run().await
     }
 
-    pub(crate) async fn connect_to_node(&self, listen_addr: SocketAddr) -> Result<(), NodeError> {
+    pub async fn connect_to_node(&self, listen_addr: SocketAddr) -> Result<(), NodeError> {
+        handshake(
+            listen_addr,
+            self.listen_addr,
+            self.node_type.to_string(),
+            self.config.network.to_string(),
+        )
+        .await
+        .map_err(|e| NodeError::Other(format!("Handshake failed: {}", e)))?;
+
+        self.p2p.add_peer(listen_addr, NodeType::Normal).await;
+
         println!(
-            "Node at {} attempting to connect to node at {}...",
+            "Node at {} successfully connected to node at {}",
             self.listen_addr, listen_addr
         );
 
-        match self.p2p.connect_to_peer(listen_addr).await {
-            Ok(_) => {
-                println!(
-                    "Node at {} successfully connected to node at {}",
-                    self.listen_addr, listen_addr
-                );
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!(
-                    "Node at {} failed to connect to node at {}: {}",
-                    self.listen_addr, listen_addr, e
-                );
-                Err(NodeError::P2PError(format!(
-                    "Failed to connect to node at {}: {}",
-                    listen_addr, e
-                )))
-            }
-        }
+        Ok(())
+    }
+
+    pub async fn add_peer(&self, addr: SocketAddr, node_type: NodeType) {
+        self.p2p.add_peer(addr, node_type).await;
+    }
+
+    // TODO do we need this?
+    // pub async fn remove_peer(&self, addr: SocketAddr) {
+    //     self.p2p.remove_peer(addr).await;
+    // }
+
+    pub async fn list_peers(&self) -> Vec<SocketAddr> {
+        self.p2p.list_peers().await
     }
 }

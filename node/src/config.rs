@@ -50,7 +50,8 @@ impl NodeConfig {
         let formatted_addr = self.listen_addr.to_string().replace(":", "_");
         let path = home_dir
             .join(".smvblock")
-            .join(format!("{}.db", formatted_addr));
+            .join("devnet")
+            .join(format!("node_{}.db", formatted_addr));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         path
     }

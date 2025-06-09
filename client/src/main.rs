@@ -42,6 +42,18 @@ enum Commands {
         #[arg(long)]
         node: Url,
     },
+
+    AddPeer {
+        #[arg(long)]
+        node: Url,
+        #[arg(long)]
+        peer: String,
+    },
+
+    ListPeers {
+        #[arg(long)]
+        node: Url,
+    },
 }
 
 #[tokio::main]
@@ -70,6 +82,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::GetPeers { node }) => {
             cli::handle_get_peers(node).await?;
+        }
+        Some(Commands::AddPeer { node, peer }) => {
+            cli::handle_add_peer(node, peer).await?;
+        }
+        Some(Commands::ListPeers { node }) => {
+            cli::handle_list_peers(node).await?;
         }
         None => {
             println!("No command specified. Use --help for usage information.");

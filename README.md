@@ -50,7 +50,7 @@ Not here. Just pure, unfiltered blockchain fundamentals.
 
 ## How it Works
 
-- [How `smv-block` works.](docs/smv-block.md)
+- [How `smv-core` works.](/docs/smv-core.md)
 
 ---
 
@@ -60,7 +60,7 @@ Not here. Just pure, unfiltered blockchain fundamentals.
 
 - Rust toolchain ([rustup](https://rustup.rs/))
 - Cargo package manager (comes with Rust)
-- ~~A terminal and a bit of patience.~~
+- ~~Lots of patience.~~
 
 ### Build
 
