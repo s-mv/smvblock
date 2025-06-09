@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use smv_core::Network;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::node::NodeType;
 

@@ -1,15 +1,16 @@
-use crate::node::NodeType;
+use crate::db::Database;
+use crate::node::{NodeError, NodeType};
 use serde::{Deserialize, Serialize};
 use smv_core::Network;
 use smv_core::blockchain::Blockchain;
 use std::collections::HashMap;
-use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::task::spawn_local;
 use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +48,7 @@ pub struct P2P {
     head_hash: Arc<Mutex<String>>,
     height: Arc<Mutex<u64>>,
     blockchain: Arc<Mutex<Blockchain>>, // shared blockchain instance
+    pub db: Database,
 }
 
 impl P2P {
@@ -55,8 +57,10 @@ impl P2P {
         network: Network,
         address: SocketAddr,
         db_path: &Path,
-    ) -> Result<Self, Box<dyn Error>> {
-        let blocks = Blockchain::load_blocks_from_db(db_path)?;
+    ) -> Result<Self, NodeError> {
+        let db = Database::new(db_path)?;
+        db.init()?;
+        let blocks = db.load_blocks()?;
         let blockchain = Blockchain::from_blocks(blocks);
 
         Ok(Self {
@@ -67,15 +71,16 @@ impl P2P {
             head_hash: Arc::new(Mutex::new(String::from("genesis"))),
             height: Arc::new(Mutex::new(0)),
             blockchain: Arc::new(Mutex::new(blockchain)),
+            db,
         })
     }
 
-    pub async fn init(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn init(&self) -> Result<(), NodeError> {
         let _listener = TcpListener::bind(self.address).await?;
         Ok(())
     }
 
-    pub async fn run(&self, db_path: &Path) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&self, db_path: &Path) -> Result<(), NodeError> {
         let listener = TcpListener::bind(self.address).await?;
         let peers = self.peers.clone();
         let head_hash = self.head_hash.clone();
@@ -83,7 +88,7 @@ impl P2P {
         let blockchain = self.blockchain.clone();
 
         let cleanup_peers = peers.clone();
-        tokio::spawn(async move {
+        spawn_local(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let mut peers = cleanup_peers.lock().await;
@@ -101,7 +106,7 @@ impl P2P {
 
             let p2p = self.clone();
 
-            tokio::spawn(async move {
+            spawn_local(async move {
                 if let Err(e) = p2p
                     .handle_connection(
                         socket, peer_addr, peers, head_hash, height, blockchain, &db_path,
@@ -118,20 +123,32 @@ impl P2P {
         self.address
     }
 
-    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn Error>> {
-        let stream = TcpStream::connect(addr).await?;
-        let hello = Message::Hello {
-            address: self.address,
-            node_type: self.node_type.clone(),
-            network: self.network.to_string(),
-        };
-        let msg = serde_json::to_string(&hello)?;
-        let mut stream = tokio::io::BufWriter::new(stream);
-        stream.write_all(msg.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        Ok(())
-    }
+    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), NodeError> {
+        println!("Attempting to connect to peer at {}", addr);
 
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                let hello = Message::Hello {
+                    address: self.address,
+                    node_type: self.node_type.clone(),
+                    network: self.network.to_string(),
+                };
+                let msg = serde_json::to_string(&hello)?;
+                let mut stream = tokio::io::BufWriter::new(stream);
+                stream.write_all(msg.as_bytes()).await?;
+                stream.write_all(b"\n").await?;
+                println!("Successfully connected to peer at {}", addr);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to peer at {}: {}", addr, e);
+                Err(NodeError::P2PError(format!(
+                    "Failed to connect to peer at {}: {}",
+                    addr, e
+                )))
+            }
+        }
+    }
     async fn handle_connection(
         &self,
         stream: TcpStream,
@@ -141,7 +158,7 @@ impl P2P {
         height: Arc<Mutex<u64>>,
         blockchain: Arc<Mutex<Blockchain>>,
         db_path: &Path,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), NodeError> {
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
         let mut writer = tokio::io::BufWriter::new(write_half);
@@ -258,10 +275,7 @@ impl P2P {
                         }
                     };
 
-                    let blockchain = blockchain.lock().await;
-                    blockchain.save_blocks_to_db(db_path)?;
-
-                    blockchain.save_blocks_to_db(db_path)?;
+                    self.db.save_blocks(&blockchain.lock().await.blocks)?;
 
                     let response = serde_json::to_string(&response)?;
                     writer.write_all(response.as_bytes()).await?;
@@ -275,7 +289,7 @@ impl P2P {
         Ok(())
     }
 
-    pub async fn get_peers(&self, addr: SocketAddr) -> Result<Vec<SocketAddr>, Box<dyn Error>> {
+    pub async fn get_peers(&self, addr: SocketAddr) -> Result<Vec<SocketAddr>, NodeError> {
         let stream = TcpStream::connect(addr).await?;
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
@@ -291,11 +305,11 @@ impl P2P {
         if let Message::Peers(peers) = serde_json::from_str(&line)? {
             Ok(peers)
         } else {
-            Err("Invalid response".into())
+            Err(NodeError::Other("Invalid response".to_string()))
         }
     }
 
-    pub async fn get_status(&self, addr: SocketAddr) -> Result<(String, u64), Box<dyn Error>> {
+    pub async fn get_status(&self, addr: SocketAddr) -> Result<(String, u64), NodeError> {
         let stream = TcpStream::connect(addr).await?;
         let (read_half, write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
@@ -311,7 +325,7 @@ impl P2P {
         if let Message::Status { head_hash, height } = serde_json::from_str(&line)? {
             Ok((head_hash, height))
         } else {
-            Err("Invalid response".into())
+            Err(NodeError::Other("Invalid response".to_string()))
         }
     }
 }

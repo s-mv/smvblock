@@ -1007,6 +1007,7 @@ dependencies = [
 name = "node"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "dirs",
  "hex",
@@ -1014,6 +1015,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smv-core",
+ "thiserror",
  "tokio",
 ]
 

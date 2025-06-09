@@ -1,11 +1,13 @@
 mod config;
+mod db;
 mod devnet;
 mod node;
 mod p2p;
 
 use clap::{Parser, ValueEnum};
 use config::NodeConfig;
-use node::{Node, NodeType};
+use devnet::Devnet;
+use node::{Node, NodeError, NodeType}; // Updated import to include NodeError.
 use smv_core::Network;
 use std::net::SocketAddr;
 
@@ -49,11 +51,12 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), NodeError> {
     let cli = Cli::parse();
 
     if cli.devnet {
-        devnet::start_devnet(cli.reset_db).await.unwrap();
+        let devnet = Devnet::default();
+        devnet.start(cli.reset_db).await?;
     } else {
         let network = match cli.network.as_str() {
             "devnet" => Network::Devnet,

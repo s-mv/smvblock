@@ -1,134 +1,141 @@
 use crate::config::NodeConfig;
-use crate::node::{Node, NodeType, ReadyState};
+use crate::node::{Node, NodeError, NodeType};
 use smv_core::Network;
-use std::error::Error;
-use std::net::SocketAddr;
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use std::fs;
-use std::path::Path;
+use tokio::task::{LocalSet, spawn_local};
 
-pub struct DevnetConfig {
-    pub seed_nodes: Vec<SocketAddr>,
-    pub normal_nodes: Vec<SocketAddr>,
-    pub shallow_nodes: Vec<SocketAddr>,
+pub struct Devnet {
+    pub seed_nodes: Vec<Node>,
+    pub normal_nodes: Vec<Node>,
+    pub shallow_nodes: Vec<Node>,
 }
 
-impl Default for DevnetConfig {
-    fn default() -> Self {
+impl Devnet {
+    pub fn default() -> Self {
         Self {
             seed_nodes: vec![
-                "127.0.0.1:8000".parse().unwrap(),
-                "127.0.0.1:8001".parse().unwrap(),
-                "127.0.0.1:8002".parse().unwrap(),
-                "127.0.0.1:8003".parse().unwrap(),
+                Node::new(NodeConfig::new(
+                    NodeType::Seed,
+                    Network::Devnet,
+                    Some("127.0.0.1:8000".parse().unwrap()),
+                    None,
+                )),
+                Node::new(NodeConfig::new(
+                    NodeType::Seed,
+                    Network::Devnet,
+                    Some("127.0.0.1:8001".parse().unwrap()),
+                    None,
+                )),
+                Node::new(NodeConfig::new(
+                    NodeType::Seed,
+                    Network::Devnet,
+                    Some("127.0.0.1:8002".parse().unwrap()),
+                    None,
+                )),
             ],
             normal_nodes: vec![
-                "127.0.0.1:8010".parse().unwrap(),
-                "127.0.0.1:8011".parse().unwrap(),
+                Node::new(NodeConfig::new(
+                    NodeType::Normal,
+                    Network::Devnet,
+                    Some("127.0.0.1:8010".parse().unwrap()),
+                    Some("127.0.0.1:8000".parse().unwrap()),
+                )),
+                Node::new(NodeConfig::new(
+                    NodeType::Normal,
+                    Network::Devnet,
+                    Some("127.0.0.1:8011".parse().unwrap()),
+                    Some("127.0.0.1:8001".parse().unwrap()),
+                )),
             ],
-            shallow_nodes: vec!["127.0.0.1:8020".parse().unwrap()],
+            shallow_nodes: vec![Node::new(NodeConfig::new(
+                NodeType::Shallow,
+                Network::Devnet,
+                Some("127.0.0.1:8020".parse().unwrap()),
+                Some("127.0.0.1:8002".parse().unwrap()),
+            ))],
         }
     }
-}
 
-// this was hell
-async fn start_node(config: NodeConfig) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
-    let node = Node::new(config.clone());
-    let mut rx = node.subscribe_ready();
+    pub fn new(seed_nodes: Vec<Node>, normal_nodes: Vec<Node>, shallow_nodes: Vec<Node>) -> Self {
+        Self {
+            seed_nodes,
+            normal_nodes,
+            shallow_nodes,
+        }
+    }
 
-    let node_handle = tokio::spawn(async move {
-        node.start()
+    pub async fn start(&self, reset_db: bool) -> Result<(), NodeError> {
+        if reset_db {
+            println!("Resetting databases...");
+            for node in self
+                .seed_nodes
+                .iter()
+                .chain(self.normal_nodes.iter())
+                .chain(self.shallow_nodes.iter())
+            {
+                let p2p = node.p2p.clone();
+                p2p.db.delete_db()?;
+                p2p.db.init()?;
+                println!("Database reset for node at {}", node.listen_addr);
+            }
+        }
+
+        let local_set = LocalSet::new();
+        local_set
+            .run_until(async {
+                println!("Starting seed nodes...");
+                for node in self.seed_nodes.clone() {
+                    Self::start_node(node).await?;
+                }
+
+                println!("Starting normal nodes...");
+                for node in self.normal_nodes.clone() {
+                    Self::start_node(node).await?;
+                }
+
+                println!("Starting shallow nodes...");
+                for node in self.shallow_nodes.clone() {
+                    Self::start_node(node).await?;
+                }
+
+                println!("Connecting nodes...");
+                self.connect_nodes().await?;
+
+                println!("All nodes are running");
+                Ok(())
+            })
             .await
-            .map_err(|e| e.to_string())
-            .map_err(|e| e.into())
-    });
+    }
 
-    println!("Waiting for ready signal from {}", config.listen_addr);
+    async fn start_node(node: Node) -> Result<(), NodeError> {
+        println!("Starting node on {}", node.listen_addr);
 
-    loop {
-        match rx.recv().await {
-            Ok(ReadyState::Ready) => {
-                println!("Node on {} is ready", config.listen_addr);
-                return node_handle;
+        spawn_local(async move {
+            if let Err(e) = node.start().await {
+                eprintln!("Node on {} failed: {}", node.listen_addr, e);
             }
-            Ok(ReadyState::Failed(e)) => {
-                eprintln!("Node on {} failed to start: {}", config.listen_addr, e);
-                node_handle.abort();
-                return tokio::spawn(async { Err(e.into()) });
-            }
-            Ok(state) => {
-                println!("Node on {} state: {:?}", config.listen_addr, state);
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                println!(
-                    "Receiver for {} lagged by {} messages, continuing...",
-                    config.listen_addr, n
-                );
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                eprintln!(
-                    "Ready channel closed unexpectedly for {}",
-                    config.listen_addr
-                );
-                node_handle.abort();
-                return tokio::spawn(async { Err("Ready channel closed".into()) });
+        });
+
+        Ok(())
+    }
+
+    async fn connect_nodes(&self) -> Result<(), NodeError> {
+        // Wait for seed nodes to be ready
+        for seed_node in &self.seed_nodes {
+            seed_node.subscribe_ready().recv().await.ok();
+        }
+
+        for normal_node in &self.normal_nodes {
+            for seed_node in &self.seed_nodes {
+                normal_node.connect_to_node(seed_node.listen_addr).await?;
             }
         }
-    }
-}
 
-pub async fn start_devnet(reset_db: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = DevnetConfig::default();
-    let db_path = Path::new("blockchain.db");
-
-    if reset_db {
-        fs::remove_file(db_path).unwrap_or_else(|_| ());
-    }
-
-    let mut handles = Vec::new();
-
-    println!("Starting seed nodes...");
-    for addr in config.seed_nodes.clone() {
-        let node_config = NodeConfig::new(NodeType::Seed, Network::Devnet, Some(addr), None);
-        let handle = start_node(node_config).await;
-        handles.push(handle);
-    }
-    println!("All seed nodes are ready");
-
-    println!("Starting normal nodes...");
-    for addr in config.normal_nodes.clone() {
-        let node_config = NodeConfig::new(
-            NodeType::Normal,
-            Network::Devnet,
-            Some(addr),
-            Some(config.seed_nodes[0]),
-        );
-        let handle = start_node(node_config).await;
-        handles.push(handle);
-    }
-
-    println!("Starting shallow nodes...");
-    for addr in config.shallow_nodes.clone() {
-        let node_config = NodeConfig::new(
-            NodeType::Shallow,
-            Network::Devnet,
-            Some(addr),
-            Some(config.seed_nodes[0]),
-        );
-        let handle = start_node(node_config).await;
-        handles.push(handle);
-    }
-
-    println!("All nodes are running");
-
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => (),
-            Ok(Err(e)) => eprintln!("Node exited with error: {}", e),
-            Err(e) => eprintln!("Node task panicked: {}", e),
+        for shallow_node in &self.shallow_nodes {
+            for seed_node in &self.seed_nodes {
+                shallow_node.connect_to_node(seed_node.listen_addr).await?;
+            }
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }

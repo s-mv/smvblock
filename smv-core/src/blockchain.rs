@@ -1,7 +1,4 @@
 use crate::{Result, block::Block, state::State, transaction::Transaction};
-use std::fs;
-use std::io::{self, BufReader, BufWriter};
-use std::path::Path;
 
 pub struct Blockchain {
     pub blocks: Vec<Block>,
@@ -31,26 +28,6 @@ impl Blockchain {
             state,
             pending_transactions: Vec::new(),
         }
-    }
-
-    pub fn load_blocks_from_db(path: &Path) -> Result<Vec<Block>> {
-        if !path.exists() {
-            return Ok(vec![Block::new(vec![], [0; 32])]);
-        }
-
-        let file = fs::File::open(path).unwrap();
-        let reader = BufReader::new(file);
-        let blocks = serde_json::from_reader(reader)
-            .map_err(|e| e.to_string())
-            .unwrap();
-        Ok(blocks)
-    }
-
-    pub fn save_blocks_to_db(&self, path: &Path) -> io::Result<()> {
-        let file = fs::File::create(path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer(writer, &self.blocks)?;
-        Ok(())
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<()> {
