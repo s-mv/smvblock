@@ -1,7 +1,6 @@
+use crate::blockchain::{Block, Transaction, Transfer, User};
 use rusqlite::{Connection, OptionalExtension, Result};
 use std::path::PathBuf;
-
-use crate::blockchain::{Block, Transaction, User};
 
 pub struct Database {
     path: PathBuf,
@@ -14,7 +13,7 @@ impl Database {
         let db_path = if test {
             let test_path = dirs::home_dir().unwrap().join(".smvblock/test.db");
             if test_path.exists() {
-                std::fs::remove_file(&test_path).unwrap();
+                let _ = std::fs::rename(&test_path, &test_path.with_extension("bak"));
             }
             test_path
         } else {
@@ -30,7 +29,8 @@ impl Database {
                 address BLOB NOT NULL,
                 public_key BLOB NOT NULL,
                 balance INTEGER NOT NULL,
-                stake INTEGER NOT NULL)",
+                stake INTEGER NOT NULL
+            )",
             [],
         )?;
 
@@ -40,21 +40,22 @@ impl Database {
                 previous_hash BLOB NOT NULL,
                 merkle_root BLOB NOT NULL,
                 nonce INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL)",
+                timestamp INTEGER NOT NULL
+            )",
             [],
         )?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                block_id INTEGER,
-                sender BLOB NOT NULL,
+                tx_hash BLOB NOT NULL,
                 receiver BLOB NOT NULL,
                 amount INTEGER NOT NULL,
                 nonce INTEGER NOT NULL,
-                signature BLOB NOT NULL,
                 sender_public_key BLOB NOT NULL,
-                FOREIGN KEY (block_id) REFERENCES blocks(id))",
+                signature BLOB NOT NULL,
+                verified BOOLEAN NOT NULL
+            )",
             [],
         )?;
 
@@ -66,7 +67,7 @@ impl Database {
     }
 
     pub fn add_block(&mut self, block: &Block) -> Result<()> {
-        let transaction = self.conn.transaction().unwrap();
+        let transaction = self.conn.transaction()?;
 
         transaction.execute(
             "INSERT INTO blocks (previous_hash, merkle_root, nonce, timestamp) VALUES (?1, ?2, ?3, ?4)",
@@ -78,20 +79,19 @@ impl Database {
             ],
         )?;
 
-        let block_id = transaction.last_insert_rowid();
-
         for tx in &block.transactions {
+            let tx_hash = tx.payload.hash();
             transaction.execute(
-                "INSERT INTO transactions (block_id, sender, receiver, amount, nonce, signature, sender_public_key)
+                "INSERT INTO transactions (tx_hash, receiver, amount, nonce, sender_public_key, signature, verified)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    block_id,
-                    tx.sender,
-                    tx.receiver,
-                    tx.amount,
-                    tx.nonce,
+                    tx_hash,
+                    tx.payload.receiver,
+                    tx.payload.amount,
+                    tx.payload.nonce,
+                    tx.sender_public_key,
                     tx.signature,
-                    tx.sender_public_key
+                    true,
                 ],
             )?;
         }
@@ -140,29 +140,112 @@ impl Database {
         Ok(blocks)
     }
 
-    pub fn add_transaction(&self, transaction: &Transaction) -> Result<()> {
+    pub fn add_unsigned_transaction(&self, tx: &Transaction) -> Result<()> {
+        self.add_transaction(tx, false)
+    }
+
+    pub fn add_signed_transaction(&self, tx: &Transaction) -> Result<()> {
+        self.add_transaction(tx, true)
+    }
+
+    pub fn add_transaction(&self, transaction: &Transaction, verified: bool) -> Result<()> {
+        let tx_hash = transaction.payload.hash();
         self.conn.execute(
-            "INSERT INTO transactions (sender, receiver, amount, nonce, signature, sender_public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![transaction.sender, transaction.receiver, transaction.amount, transaction.nonce, transaction.signature, transaction.sender_public_key],
+            "INSERT INTO transactions (tx_hash, receiver, amount, nonce, sender_public_key, signature, verified) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                tx_hash,
+                transaction.payload.receiver,
+                transaction.payload.amount,
+                transaction.payload.nonce,
+                transaction.sender_public_key,
+                transaction.signature,
+                verified,
+            ],
         )?;
         Ok(())
     }
 
-    pub fn get_transactions(&self) -> Result<Vec<Transaction>> {
-        let mut stmt = self.conn.prepare("SELECT sender, receiver, amount, nonce, signature, sender_public_key FROM transactions")?;
+    pub fn get_unverified_transactions(&self) -> Result<Vec<Transaction>> {
+        self.get_transactions(false)
+    }
+
+    pub fn get_verified_transactions(&self) -> Result<Vec<Transaction>> {
+        self.get_transactions(true)
+    }
+
+    pub fn get_all_transactions(&self) -> Result<Vec<Transaction>> {
+        let query =
+            "SELECT receiver, amount, nonce, sender_public_key, signature FROM transactions";
+
+        let mut stmt = self.conn.prepare(&query)?;
         let transactions = stmt
             .query_map([], |row| {
                 Ok(Transaction {
-                    sender: row.get(0)?,
-                    receiver: row.get(1)?,
-                    amount: row.get(2)?,
-                    nonce: row.get(3)?,
+                    sender_public_key: row.get(3)?,
                     signature: row.get(4)?,
-                    sender_public_key: row.get(5)?,
+                    payload: Transfer {
+                        receiver: row.get(0)?,
+                        amount: row.get(1)?,
+                        nonce: row.get(2)?,
+                    },
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(transactions)
+    }
+
+    fn get_transactions(&self, verified: bool) -> Result<Vec<Transaction>> {
+        let query = format!(
+            "SELECT receiver, amount, nonce, sender_public_key, signature FROM transactions WHERE verified = {}",
+            verified
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let transactions = stmt
+            .query_map([], |row| {
+                Ok(Transaction {
+                    sender_public_key: row.get(3)?,
+                    signature: row.get(4)?,
+                    payload: Transfer {
+                        receiver: row.get(0)?,
+                        amount: row.get(1)?,
+                        nonce: row.get(2)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(transactions)
+    }
+
+    pub fn get_transaction_by_hash(&self, tx_hash: &[u8]) -> Result<Option<Transaction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT receiver, amount, nonce, sender_public_key, signature FROM transactions WHERE tx_hash = ?1",
+        )?;
+
+        let transaction = stmt
+            .query_row(rusqlite::params![tx_hash], |row| {
+                Ok(Transaction {
+                    sender_public_key: row.get(3)?,
+                    signature: row.get(4)?,
+                    payload: Transfer {
+                        receiver: row.get(0)?,
+                        amount: row.get(1)?,
+                        nonce: row.get(2)?,
+                    },
+                })
+            })
+            .optional()?;
+
+        Ok(transaction)
+    }
+
+    pub fn update_transaction_verified(&self, tx_hash: &[u8], verified: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE transactions SET verified = ?1 WHERE tx_hash = ?2",
+            rusqlite::params![verified, tx_hash],
+        )?;
+        Ok(())
     }
 
     pub fn add_user(&self, user: &User) -> Result<()> {
@@ -194,6 +277,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare("SELECT address, public_key, balance, stake FROM users WHERE address = ?1")?;
+
         let user = stmt
             .query_row(rusqlite::params![address], |row| {
                 Ok(User {
@@ -204,13 +288,15 @@ impl Database {
                 })
             })
             .optional()?;
+
         Ok(user)
     }
 
     pub fn get_nonce(&self, address: &[u8]) -> Result<u64> {
         let mut stmt = self
             .conn
-            .prepare("SELECT COUNT(*) FROM transactions WHERE sender = ?1")?;
+            .prepare("SELECT COUNT(*) FROM transactions WHERE sender_public_key = ?1")?;
+
         let nonce: u64 = stmt.query_row(rusqlite::params![address], |row| row.get(0))?;
         Ok(nonce)
     }
@@ -229,5 +315,18 @@ impl Database {
             rusqlite::params![address],
         )?;
         Ok(())
+    }
+
+    pub fn get_total_stake(&self) -> Result<u64> {
+        let mut stmt = self.conn.prepare("SELECT SUM(stake) FROM users")?;
+        let total_stake: u64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(total_stake)
+    }
+
+    pub fn close(self) -> Result<(), rusqlite::Error> {
+        match self.conn.close() {
+            Ok(_) => Ok(()),
+            Err((_, e)) => Err(e),
+        }
     }
 }

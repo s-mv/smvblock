@@ -1,20 +1,93 @@
 use crate::db::Database;
-use bincode::encode_to_vec;
-use bincode::{Encode, config::standard};
+use bincode::config::standard;
+use bincode::{Decode, Encode, encode_to_vec};
 use chrono::{DateTime, Utc};
-use ed25519_dalek::ed25519::signature::Verifier;
-use ed25519_dalek::{Signature, VerifyingKey};
-use libp2p::futures;
+use ed25519_dalek::ed25519::signature::{SignerMut, Verifier};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use libp2p::futures::lock::Mutex;
-use rand::distr::Distribution;
-use rand::distr::weighted::WeightedIndex;
+use libp2p::identity::ed25519::Keypair;
+use rand::distributions::WeightedIndex;
+use rand::prelude::Distribution;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub type Hash = [u8; 32];
 pub type Address = [u8; 32];
+
+#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode)]
+pub struct Transfer {
+    pub receiver: Address,
+    pub amount: u64,
+    pub nonce: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode)]
+pub struct Transaction {
+    pub payload: Transfer,
+    pub sender_public_key: [u8; 32],
+    #[serde(with = "serde_big_array::BigArray")]
+    pub signature: [u8; 64],
+}
+
+impl Transfer {
+    pub fn serialize(&self) -> Vec<u8> {
+        encode_to_vec(self, standard()).expect("Failed to serialize unsigned transaction")
+    }
+
+    pub(crate) fn hash(&self) -> [u8; 32] {
+        let encoded = self.serialize();
+        let digest = Sha256::digest(&encoded);
+        digest.into()
+    }
+
+    pub fn into_transaction(self, key: &SigningKey) -> Transaction {
+        Transaction::sign(self, &mut key.clone())
+    }
+}
+
+impl Transaction {
+    pub fn sign(unsigned: Transfer, signing_key: &mut SigningKey) -> Self {
+        let message_hash = unsigned.hash(); // << Changed
+        let signature = signing_key.sign(&message_hash);
+
+        Self {
+            payload: unsigned,
+            sender_public_key: signing_key.verifying_key().to_bytes(),
+            signature: signature.to_bytes(),
+        }
+    }
+
+    pub fn verify(&self) -> bool {
+        let verifying_key = match VerifyingKey::from_bytes(&self.sender_public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+
+        let message_hash = self.payload.hash(); // << Changed
+        let signature = Signature::from_bytes(&self.signature);
+
+        verifying_key.verify(&message_hash, &signature).is_ok()
+    }
+
+    pub fn from_unsigned(unsigned: Transfer, keypair: &Keypair) -> Self {
+        let tx_hash = unsigned.hash();
+        let signature = keypair.sign(&tx_hash);
+
+        Self {
+            payload: unsigned,
+            sender_public_key: keypair.public().to_bytes(),
+            signature: signature.try_into().expect("Signature must be 64 bytes"),
+        }
+    }
+
+    pub fn sender_address(&self) -> Address {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.sender_public_key);
+        hasher.finalize().into()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct User {
@@ -22,17 +95,6 @@ pub struct User {
     pub public_key: [u8; 32],
     pub balance: u64,
     pub stake: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Encode, Serialize)]
-pub struct Transaction {
-    pub sender: Address,
-    pub receiver: Address,
-    pub amount: u64,
-    pub nonce: u64,
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
-    pub sender_public_key: [u8; 32],
 }
 
 #[derive(Clone, Debug, Deserialize, Encode, Serialize)]
@@ -44,8 +106,35 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
 }
 
+#[derive(Debug)]
 pub struct Blockchain {
     db: Arc<Mutex<Database>>,
+}
+
+impl User {
+    pub fn generate(initial_balance: u64) -> (Self, [u8; 32]) {
+        let mut csprng = OsRng;
+        let private_key = SigningKey::generate(&mut csprng);
+        let verifying_key = private_key.verifying_key();
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifying_key.to_bytes());
+        let address = hasher.finalize();
+
+        let user = User {
+            address: address.into(),
+            public_key: verifying_key.to_bytes(),
+            balance: initial_balance,
+            stake: 0,
+        };
+
+        (user, private_key.to_bytes())
+    }
+}
+
+pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
+    let signing_key = SigningKey::from_bytes(private_key);
+    signing_key.verifying_key().to_bytes()
 }
 
 impl Block {
@@ -85,6 +174,12 @@ impl Blockchain {
             return Err("Unauthorized block proposer".to_string());
         }
 
+        for tx in &block.transactions {
+            if !tx.verify() {
+                return Err("Invalid transaction in block".to_string());
+            }
+        }
+
         let mut db = self.db.lock().await;
         db.add_block(&block)
             .map_err(|_| "Error adding block".to_string())?;
@@ -103,29 +198,15 @@ impl Blockchain {
     }
 
     pub async fn add_transaction(&self, transaction: Transaction) -> Result<(), String> {
-        if self.validate_transaction(&transaction) {
-            let db = self.db.lock().await;
-            db.add_transaction(&transaction)
-                .map_err(|_| "Error: Failed to add transaction to the database".to_string())?;
-            Ok(())
-        } else {
-            Err("Error: Invalid transaction".to_string())
-        }
+        let db = self.db.lock().await;
+        db.add_transaction(&transaction, transaction.verify())
+            .map_err(|_| "Error: Failed to add transaction to the database".to_string())?;
+        Ok(())
     }
 
     pub async fn get_transactions(&self) -> Result<Vec<Transaction>, rusqlite::Error> {
         let db = self.db.lock().await;
-        db.get_transactions()
-    }
-
-    pub async fn add_user(&self, user: User) -> Result<(), rusqlite::Error> {
-        let db = self.db.lock().await;
-        db.add_user(&user)
-    }
-
-    pub async fn get_users(&self) -> Result<Vec<User>, rusqlite::Error> {
-        let db = self.db.lock().await;
-        db.get_users()
+        db.get_all_transactions()
     }
 
     pub async fn select_validator(&self) -> Result<Address, String> {
@@ -143,54 +224,10 @@ impl Blockchain {
 
         let dist = WeightedIndex::new(&stakes)
             .map_err(|_| "Error creating weighted distribution".to_string())?;
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         let selected_index = dist.sample(&mut rng);
 
         Ok(addresses[selected_index])
-    }
-
-    pub async fn stake(&self, user_address: Address, amount: u64) -> Result<(), String> {
-        let db = self.db.lock().await;
-        let user = db
-            .get_user(&user_address)
-            .map_err(|_| "Error fetching user".to_string())?;
-
-        if let Some(mut user) = user {
-            if user.balance < amount {
-                return Err("Insufficient balance to stake".to_string());
-            }
-
-            user.balance -= amount;
-            user.stake += amount;
-
-            db.update_user(&user)
-                .map_err(|_| "Error updating user".to_string())?;
-            Ok(())
-        } else {
-            Err("User not found".to_string())
-        }
-    }
-
-    pub async fn unstake(&self, user_address: Address, amount: u64) -> Result<(), String> {
-        let db = self.db.lock().await;
-        let user = db
-            .get_user(&user_address)
-            .map_err(|_| "Error fetching user".to_string())?;
-
-        if let Some(mut user) = user {
-            if user.stake < amount {
-                return Err("Insufficient stake to unstake".to_string());
-            }
-
-            user.stake -= amount;
-            user.balance += amount;
-
-            db.update_user(&user)
-                .map_err(|_| "Error updating user".to_string())?;
-            Ok(())
-        } else {
-            Err("User not found".to_string())
-        }
     }
 
     pub async fn reward_validator(
@@ -236,68 +273,6 @@ impl Blockchain {
         } else {
             Err("Validator not found".to_string())
         }
-    }
-
-    fn validate_transaction(&self, tx: &Transaction) -> bool {
-        let mut hasher = Sha256::new();
-        hasher.update(&tx.sender_public_key);
-        let computed_address = hasher.finalize();
-        if tx.sender != computed_address[..] {
-            eprintln!("Invalid address: does not match public key");
-            return false;
-        }
-
-        if !self.verify_signature(tx) {
-            eprintln!("Invalid signature");
-            return false;
-        }
-
-        let db_guard = match futures::executor::block_on(self.db.lock()) {
-            db => db,
-        };
-
-        let sender = match db_guard.get_user(&tx.sender) {
-            Ok(Some(user)) => user,
-            _ => {
-                eprintln!("Sender not found");
-                return false;
-            }
-        };
-
-        let expected_nonce = db_guard.get_nonce(&tx.sender).unwrap_or(0);
-        if tx.nonce != expected_nonce {
-            eprintln!(
-                "Invalid nonce: expected {}, got {}",
-                expected_nonce, tx.nonce
-            );
-            return false;
-        }
-
-        if sender.balance < tx.amount {
-            eprintln!("Insufficient balance");
-            return false;
-        }
-
-        true
-    }
-
-    fn verify_signature(&self, tx: &Transaction) -> bool {
-        let verifying_key = match VerifyingKey::from_bytes(&tx.sender_public_key) {
-            Ok(pk) => pk,
-            Err(_) => return false,
-        };
-
-        let signature = Signature::from_bytes(&tx.signature);
-
-        let message = match encode_to_vec(
-            (&tx.sender, &tx.receiver, tx.amount, tx.nonce),
-            bincode::config::standard(),
-        ) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-
-        verifying_key.verify(&message, &signature).is_ok()
     }
 }
 

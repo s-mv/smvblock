@@ -2,6 +2,7 @@ use crate::db::Database;
 use libp2p::futures::lock::Mutex;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct P2P {
     db: Arc<Mutex<Database>>,
 }
