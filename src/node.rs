@@ -1,7 +1,9 @@
-use crate::blockchain::{Address, Blockchain, User};
+use crate::blockchain::{Address, Block, Blockchain, Transfer, User};
 use crate::db::Database;
 use crate::p2p::P2P;
+use ed25519_dalek::SigningKey;
 use libp2p::futures::lock::Mutex;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -132,5 +134,78 @@ impl Node {
         } else {
             Err("Validator not found".to_string())
         }
+    }
+
+    pub async fn send_transaction(
+        &self,
+        sender_private_key: SigningKey,
+        receiver: Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let db = self.database.lock().await;
+
+        let sender_public_key = crate::blockchain::derive_public_key(&sender_private_key);
+        let sender_address: [u8; 32] = Sha256::digest(sender_public_key).into();
+
+        if sender_address == receiver {
+            return Err("Sender and receiver cannot be the same".to_string());
+        }
+
+        let sender = db
+            .get_user(&sender_address)
+            .map_err(|_| "Sender not found".to_string())?
+            .ok_or("Sender not found".to_string())?;
+
+        if sender.balance < amount {
+            return Err("Insufficient balance".to_string());
+        }
+
+        let nonce = db.get_latest_nonce(&sender_address).unwrap();
+
+        let transfer = Transfer {
+            receiver,
+            amount,
+            nonce,
+        };
+
+        let tx = transfer.into_transaction(&sender_private_key);
+
+        drop(db);
+        self.blockchain.add_transaction(tx).await
+    }
+
+    pub async fn produce_block(&mut self) -> Result<[u8; 32], String> {
+        let transactions = self
+            .blockchain
+            .get_transactions()
+            .await
+            .map_err(|_| "Failed to fetch transactions".to_string())?;
+
+        let blocks = self
+            .blockchain
+            .get_blocks()
+            .await
+            .map_err(|_| "Failed to fetch blocks".to_string())?;
+
+        let previous_hash = blocks
+            .last()
+            .map(|b| b.hash().unwrap_or([0u8; 32]))
+            .unwrap_or([0u8; 32]);
+
+        let nonce = blocks.len() as u64;
+        let proposer = self.blockchain.select_validator().await?;
+        let block = Block::new(previous_hash, nonce, transactions);
+
+        self.blockchain.apply_block(&block).await?;
+        self.blockchain.add_block(block.clone(), proposer).await?;
+
+        let hash = block
+            .hash()
+            .map_err(|e| format!("Block hashing failed: {}", e))?;
+        println!(
+            "Block successfully produced with hash: {}",
+            hex::encode(hash)
+        );
+        Ok(hash)
     }
 }

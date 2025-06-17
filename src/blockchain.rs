@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::ed25519::signature::{SignerMut, Verifier};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use libp2p::futures::lock::Mutex;
-use libp2p::identity::ed25519::Keypair;
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::OsRng;
@@ -16,14 +15,14 @@ use std::sync::Arc;
 pub type Hash = [u8; 32];
 pub type Address = [u8; 32];
 
-#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode)]
+#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode, PartialEq)]
 pub struct Transfer {
     pub receiver: Address,
     pub amount: u64,
     pub nonce: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode)]
+#[derive(Clone, Debug, Deserialize, Serialize, Encode, Decode, PartialEq)]
 pub struct Transaction {
     pub payload: Transfer,
     pub sender_public_key: [u8; 32],
@@ -49,7 +48,7 @@ impl Transfer {
 
 impl Transaction {
     pub fn sign(unsigned: Transfer, signing_key: &mut SigningKey) -> Self {
-        let message_hash = unsigned.hash(); // << Changed
+        let message_hash = unsigned.hash();
         let signature = signing_key.sign(&message_hash);
 
         Self {
@@ -65,21 +64,10 @@ impl Transaction {
             Err(_) => return false,
         };
 
-        let message_hash = self.payload.hash(); // << Changed
+        let message_hash = self.payload.hash();
         let signature = Signature::from_bytes(&self.signature);
 
         verifying_key.verify(&message_hash, &signature).is_ok()
-    }
-
-    pub fn from_unsigned(unsigned: Transfer, keypair: &Keypair) -> Self {
-        let tx_hash = unsigned.hash();
-        let signature = keypair.sign(&tx_hash);
-
-        Self {
-            payload: unsigned,
-            sender_public_key: keypair.public().to_bytes(),
-            signature: signature.try_into().expect("Signature must be 64 bytes"),
-        }
     }
 
     pub fn sender_address(&self) -> Address {
@@ -112,7 +100,7 @@ pub struct Blockchain {
 }
 
 impl User {
-    pub fn generate(initial_balance: u64) -> (Self, [u8; 32]) {
+    pub fn generate(initial_balance: u64) -> (Self, SigningKey) {
         let mut csprng = OsRng;
         let private_key = SigningKey::generate(&mut csprng);
         let verifying_key = private_key.verifying_key();
@@ -128,13 +116,12 @@ impl User {
             stake: 0,
         };
 
-        (user, private_key.to_bytes())
+        (user, private_key)
     }
 }
 
-pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
-    let signing_key = SigningKey::from_bytes(private_key);
-    signing_key.verifying_key().to_bytes()
+pub fn derive_public_key(private_key: &SigningKey) -> VerifyingKey {
+    private_key.verifying_key()
 }
 
 impl Block {
@@ -168,10 +155,32 @@ impl Blockchain {
         Blockchain { db }
     }
 
+    pub async fn create_genesis_block(&self) -> Result<(), String> {
+        let mut db = self.db.lock().await;
+
+        if db.get_latest_block().map_err(|_| "DB error")?.is_some() {
+            return Err("Genesis block already exists".to_string());
+        }
+
+        let genesis_block = Block::new([0u8; 32], 0, vec![]);
+
+        db.add_block(&genesis_block)
+            .map_err(|_| "Failed to add genesis block".to_string())?;
+
+        println!("Genesis block created!");
+        Ok(())
+    }
+
     pub async fn add_block(&mut self, block: Block, proposer: Address) -> Result<(), String> {
-        let selected_validator = self.select_validator().await?;
-        if proposer != selected_validator {
-            return Err("Unauthorized block proposer".to_string());
+        let is_registered = {
+            let db = self.db.lock().await;
+            db.get_user(&proposer)
+                .map_err(|_| "DB error".to_string())?
+                .is_some()
+        };
+
+        if !is_registered {
+            return Err("Proposer not found".to_string());
         }
 
         for tx in &block.transactions {
@@ -183,7 +192,10 @@ impl Blockchain {
         let mut db = self.db.lock().await;
         db.add_block(&block)
             .map_err(|_| "Error adding block".to_string())?;
-        self.reward_validator(proposer, 10).await?;
+        drop(db);
+
+        self.reward_validator(proposer).await?;
+
         Ok(())
     }
 
@@ -230,17 +242,16 @@ impl Blockchain {
         Ok(addresses[selected_index])
     }
 
-    pub async fn reward_validator(
-        &self,
-        validator_address: Address,
-        reward: u64,
-    ) -> Result<(), String> {
+    pub async fn reward_validator(&self, validator_address: Address) -> Result<(), String> {
         let db = self.db.lock().await;
+
         let user = db
             .get_user(&validator_address)
             .map_err(|_| "Error fetching user".to_string())?;
 
         if let Some(mut user) = user {
+            let total_stake = db.get_total_stake().unwrap() as f64;
+            let reward = (user.stake as f64 / total_stake).round() as u64;
             user.balance += reward;
             db.update_user(&user)
                 .map_err(|_| "Error updating user".to_string())?;
@@ -273,6 +284,43 @@ impl Blockchain {
         } else {
             Err("Validator not found".to_string())
         }
+    }
+
+    pub async fn apply_block(&self, block: &Block) -> Result<(), String> {
+        let db = self.db.lock().await;
+
+        for tx in &block.transactions {
+            let Transfer {
+                receiver, amount, ..
+            } = tx.payload;
+            let sender_pub_key = tx.sender_public_key;
+            let sender_address: Address = Sha256::digest(sender_pub_key).into();
+
+            let mut sender = db
+                .get_user(&sender_address)
+                .map_err(|_| "Sender not found".to_string())?
+                .ok_or("Sender not found".to_string())?;
+
+            let mut receiver = db
+                .get_user(&receiver)
+                .map_err(|_| "Receiver not found".to_string())?
+                .ok_or("Receiver not found".to_string())?;
+
+            if sender.balance < amount {
+                return Err(format!(
+                    "Sender {} has insufficient balance",
+                    hex::encode(sender.address)
+                ));
+            }
+
+            sender.balance -= amount;
+            receiver.balance += amount;
+
+            db.update_user(&sender).map_err(|e| e.to_string())?;
+            db.update_user(&receiver).map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
     }
 }
 

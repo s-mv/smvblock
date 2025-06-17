@@ -1,25 +1,53 @@
-use smvblock::blockchain::{User, derive_public_key};
-use smvblock::node::{Node, NodeType};
+use smvblock::{
+    blockchain::User,
+    node::{Node, NodeType},
+};
 
 #[tokio::main]
 async fn main() {
-    let node = Node::new(NodeType::FullNode, true).expect("Failed to initialize node");
+    let mut node = Node::new(NodeType::FullNode, true).unwrap();
 
-    let (user, key) = User::generate(500);
+    let (user1, user1_pk) = User::generate(100);
+    let (user2, _) = User::generate(100);
 
-    node.add_user(user).await.unwrap();
+    node.add_user(user1.clone()).await.unwrap();
+    node.add_user(user2.clone()).await.unwrap();
+
+    node.stake(user1.address, 30).await.unwrap();
+    node.stake(user2.address, 20).await.unwrap();
 
     let users = node.get_users().await.unwrap();
 
-    println!("Users in the node: {:?}", users);
-    println!("User's private key: {:?}", key);
+    for user in users {
+        println!(
+            "User: {}, Balance: {}, Stake: {}",
+            hex::encode(user.address),
+            user.balance,
+            user.stake
+        );
+    }
+
+    node.send_transaction(user1_pk, user2.address, 20)
+        .await
+        .unwrap();
+
     println!(
-        "User's public key derived from the private key: {:?}",
-        derive_public_key(&key)
+        "Transaction sent from {} to {}",
+        hex::encode(user1.address),
+        hex::encode(user2.address)
     );
-    println!("Node type: {:?}", node.node_type);
-    println!("Node database: {:?}", node.database);
-    println!("Node blockchain: {:?}", node.blockchain);
-    println!("Node P2P: {:?}", node.p2p);
-    println!("Node initialized successfully!");
+
+    let block_hash = node.produce_block().await.unwrap();
+    println!("Produced block with hash: {}", hex::encode(block_hash));
+
+    let users = node.get_users().await.unwrap();
+
+    for user in users {
+        println!(
+            "User: {}, Balance: {}, Stake: {}",
+            hex::encode(user.address),
+            user.balance,
+            user.stake
+        );
+    }
 }

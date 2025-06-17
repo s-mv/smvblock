@@ -1,4 +1,4 @@
-use crate::blockchain::{Block, Transaction, Transfer, User};
+use crate::blockchain::{Address, Block, Transaction, Transfer, User};
 use rusqlite::{Connection, OptionalExtension, Result};
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ pub struct Database {
 
 impl Database {
     pub fn new(path: Option<&str>, test: bool) -> Result<Self> {
-        let db_path = if test {
+        let path = if test {
             let test_path = dirs::home_dir().unwrap().join(".smvblock/test.db");
             if test_path.exists() {
                 let _ = std::fs::rename(&test_path, &test_path.with_extension("bak"));
@@ -21,7 +21,7 @@ impl Database {
                 .unwrap_or_else(|| dirs::home_dir().unwrap().join(".smvblock/temp.db"))
         };
 
-        let conn = Connection::open(&db_path)?;
+        let conn = Connection::open(&path)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS users (
@@ -59,11 +59,7 @@ impl Database {
             [],
         )?;
 
-        Ok(Database {
-            path: db_path,
-            conn,
-            test,
-        })
+        Ok(Database { path, conn, test })
     }
 
     pub fn add_block(&mut self, block: &Block) -> Result<()> {
@@ -273,7 +269,7 @@ impl Database {
         Ok(users)
     }
 
-    pub fn get_user(&self, address: &[u8]) -> Result<Option<User>> {
+    pub fn get_user(&self, address: &Address) -> Result<Option<User>> {
         let mut stmt = self
             .conn
             .prepare("SELECT address, public_key, balance, stake FROM users WHERE address = ?1")?;
@@ -292,13 +288,35 @@ impl Database {
         Ok(user)
     }
 
-    pub fn get_nonce(&self, address: &[u8]) -> Result<u64> {
+    pub fn get_latest_block(&self) -> Result<Option<Block>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT previous_hash, merkle_root, nonce, timestamp FROM blocks ORDER BY id DESC LIMIT 1",
+        )?;
+
+        let block = stmt
+            .query_row([], |row| {
+                Ok(Block {
+                    previous_hash: row.get(0)?,
+                    merkle_root: row.get(1)?,
+                    nonce: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    transactions: vec![],
+                })
+            })
+            .optional()?;
+
+        Ok(block)
+    }
+
+    pub fn get_latest_nonce(&self, sender_public_key: &[u8]) -> Result<u64> {
         let mut stmt = self
             .conn
-            .prepare("SELECT COUNT(*) FROM transactions WHERE sender_public_key = ?1")?;
+            .prepare("SELECT MAX(nonce) FROM transactions WHERE sender_public_key = ?1")?;
 
-        let nonce: u64 = stmt.query_row(rusqlite::params![address], |row| row.get(0))?;
-        Ok(nonce)
+        let max_nonce: Option<u64> =
+            stmt.query_row(rusqlite::params![sender_public_key], |row| row.get(0))?;
+
+        Ok(max_nonce.unwrap_or(0))
     }
 
     pub fn update_user(&self, user: &User) -> Result<()> {
