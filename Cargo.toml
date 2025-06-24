@@ -1,3 +1,21 @@
-[workspace]
-resolver = "3"
-members = ["client", "node","smv-core"]
+[package]
+name = "smvblock"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = { version = "2.0.1", features = ["serde"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+crypto = "0.5.1"
+dirs = "6.0.0"
+ed25519-dalek = "2.1.1"
+hex = "0.4.3"
+libp2p = { version = "0.55.0", features = ["tcp", "mdns"] }
+rand = "0.8"
+rand_core = { version = "0.9.3", features = ["os_rng"] }
+rusqlite = "0.36.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde-big-array = "0.5.1"
+serde_json = "1.0.140"
+sha2 = "0.10.9"
+tokio = { version = "1.45.1", features = ["io-util", "io-std", "macros", "rt", "rt-multi-thread", "sync", "time"] }
