@@ -31,11 +31,11 @@ cargo run
 ```
 
 ## Roadmap (to be extended as I progress)
-[-] Block structure
-[-] Transaction and payload format
-[-] Local chain with basic state validation + PoS
-[-] State persistence with SQLite
-[ ] Simple CLI node
-[ ] Persistence across ultiple nodes
-[ ] VM/contract DSL
+- [x] Block structure
+- [x] Transaction and payload format
+- [x] Local chain with basic state validation + PoS
+- [x] State persistence with SQLite
+- [ ] Simple CLI node
+- [ ] Persistence across ultiple nodes
+- [ ] VM/contract DSL
 
