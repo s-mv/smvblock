@@ -2,7 +2,7 @@
 A lightweight distributed system running a minimal blockchain, inspired by
 Ethereum’s design principles.
 
-![screenshot](/screen.png)
+![screenshot](screen.jpg)
 
 **smvblock** is a work-in-progress (WIP) experiment to build a super simple
 blockchain-based distributed system. It aims to capture the essence of
