@@ -1,0 +1,13 @@
+[project]
+name = "client"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio>=1.80.0",
+    "grpcio-tools>=1.80.0",
+    "numpy>=2.4.4",
+    "torch>=2.11.0",
+    "uuid>=1.30",
+]

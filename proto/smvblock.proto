@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package smvblock;
+
+service SmvNode {
+  rpc Execute(Task) returns (TaskResult);
+  rpc Forward(Task) returns (TaskResult);
+}
+
+message Task {
+  string id = 1;
+  string op = 2;
+  string inputs = 3;
+  int32 ttl = 4;
+}
+
+message TaskResult {
+  string id = 1;
+  string status = 2;
+  string result = 3;
+}
